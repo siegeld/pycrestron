@@ -1094,6 +1094,608 @@ All in `pycrestron.protocol`:
 
 ---
 
+## Examples
+
+### Room Control Script
+
+Control a full conference room from a Python script — power on projector, set volume, select source:
+
+```python
+import asyncio
+from pycrestron import CrestronClient
+
+PROCESSOR = "10.11.4.155"
+IP_ID = 0x1a
+
+# Join map (matches your SIMPL program)
+PROJECTOR_POWER = 1
+SCREEN_DOWN = 2
+VOLUME = 1
+SOURCE_HDMI1 = 10
+SOURCE_HDMI2 = 11
+SOURCE_VGA = 12
+SOURCE_NAME = 1
+
+async def start_meeting():
+    async with CrestronClient(PROCESSOR, IP_ID, username="admin", password="pw") as c:
+        # Power on projector
+        await c.set_digital(PROJECTOR_POWER, True)
+
+        # Lower screen
+        await c.press(SCREEN_DOWN)
+
+        # Set volume to 40%
+        await c.set_analog(VOLUME, int(0.40 * 65535))
+
+        # Select HDMI 1
+        await c.press(SOURCE_HDMI1)
+
+        # Display source name
+        await c.set_serial(SOURCE_NAME, "Laptop HDMI")
+
+        print("Meeting room ready!")
+
+asyncio.run(start_meeting())
+```
+
+### Monitor All Signals (Protocol Sniffer)
+
+See every signal change in real time — useful for reverse-engineering an existing Crestron program:
+
+```python
+import asyncio
+from pycrestron import CIPConnection
+from pycrestron.protocol import CIPPacketType, parse_cip_header, parse_cresnet_signals
+
+async def sniff():
+    async with CIPConnection("10.11.4.155", 0x1a) as conn:
+        def on_packet(ptype, payload):
+            if ptype in (CIPPacketType.DATA, CIPPacketType.EXTENDED_DATA):
+                events = parse_cresnet_signals(payload[2:])  # skip handle
+                for e in events:
+                    print(f"  {e.signal_type.value:8s} join={e.join:4d}  value={e.value}")
+            else:
+                print(f"  PACKET 0x{ptype:02x}  len={len(payload)}  {payload[:20].hex()}")
+
+        conn.on_packet(on_packet)
+
+        print("Sniffing CIP traffic... (Ctrl+C to stop)")
+        try:
+            while True:
+                await asyncio.sleep(1)
+        except KeyboardInterrupt:
+            pass
+
+asyncio.run(sniff())
+```
+
+### Volume Ramping
+
+Smoothly ramp a volume slider over time:
+
+```python
+import asyncio
+from pycrestron import CrestronClient
+
+async def ramp_volume(client, join, start_pct, end_pct, duration_sec=2.0, steps=20):
+    """Ramp an analog join from start% to end% over duration."""
+    start_val = int(start_pct / 100 * 65535)
+    end_val = int(end_pct / 100 * 65535)
+    step_delay = duration_sec / steps
+
+    for i in range(steps + 1):
+        t = i / steps
+        value = int(start_val + (end_val - start_val) * t)
+        await client.set_analog(join, value)
+        await asyncio.sleep(step_delay)
+
+async def main():
+    async with CrestronClient("10.11.4.155", 0x1a, username="admin", password="pw") as c:
+        # Fade volume from 0% to 60% over 3 seconds
+        await ramp_volume(c, join=1, start_pct=0, end_pct=60, duration_sec=3.0)
+
+asyncio.run(main())
+```
+
+### Bidirectional Feedback Loop
+
+Read processor state and react to changes — e.g., log when someone presses buttons on a touch panel:
+
+```python
+import asyncio
+from datetime import datetime
+from pycrestron import CrestronClient
+
+async def main():
+    client = CrestronClient("10.11.4.155", 0x1a, username="admin", password="pw")
+
+    # Log all digital changes (joins 1-20)
+    for join in range(1, 21):
+        j = join  # capture for closure
+        client.subscribe_digital(j, lambda v, j=j: print(
+            f"[{datetime.now():%H:%M:%S}] Digital {j:3d} = {'ON' if v else 'OFF'}"
+        ))
+
+    # Log volume changes
+    client.subscribe_analog(1, lambda v: print(
+        f"[{datetime.now():%H:%M:%S}] Volume = {v / 65535 * 100:.0f}%"
+    ))
+
+    # Log source changes
+    client.subscribe_serial(1, lambda v: print(
+        f"[{datetime.now():%H:%M:%S}] Source = {v}"
+    ))
+
+    await client.start()
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        await client.stop()
+
+asyncio.run(main())
+```
+
+### Multiple Processors
+
+Connect to multiple Crestron processors simultaneously:
+
+```python
+import asyncio
+from pycrestron import CrestronClient
+
+PROCESSORS = [
+    {"host": "10.11.4.155", "ip_id": 0x1a, "name": "Conference Room"},
+    {"host": "10.11.4.156", "ip_id": 0x1b, "name": "Boardroom"},
+    {"host": "10.11.4.157", "ip_id": 0x1c, "name": "Lobby"},
+]
+
+async def monitor_processor(config):
+    client = CrestronClient(
+        config["host"], config["ip_id"],
+        username="admin", password="pw",
+    )
+
+    client.subscribe_digital(1, lambda v, name=config["name"]:
+        print(f"{name}: Power {'ON' if v else 'OFF'}")
+    )
+
+    client.on_availability_changed = lambda avail, name=config["name"]:
+        print(f"{name}: {'ONLINE' if avail else 'OFFLINE'}")
+
+    await client.start()
+
+    # Keep running
+    while True:
+        await asyncio.sleep(1)
+
+async def main():
+    tasks = [monitor_processor(p) for p in PROCESSORS]
+    await asyncio.gather(*tasks)
+
+asyncio.run(main())
+```
+
+### Scheduled Actions (Cron-Style)
+
+Run time-based automation — e.g., dim lights at 10pm, turn off projector after hours:
+
+```python
+import asyncio
+from datetime import datetime
+from pycrestron import CrestronClient
+
+LIGHTS_LEVEL = 1    # analog join
+PROJECTOR_POWER = 1  # digital join
+
+async def scheduler(client):
+    while True:
+        now = datetime.now()
+
+        # 10:00 PM — dim lights to 20%
+        if now.hour == 22 and now.minute == 0:
+            await client.set_analog(LIGHTS_LEVEL, int(0.20 * 65535))
+            print("Lights dimmed for evening")
+
+        # 11:00 PM — lights off, projector off
+        if now.hour == 23 and now.minute == 0:
+            await client.set_analog(LIGHTS_LEVEL, 0)
+            await client.set_digital(PROJECTOR_POWER, False)
+            print("After-hours shutdown")
+
+        # 7:00 AM — lights to 80%
+        if now.hour == 7 and now.minute == 0:
+            await client.set_analog(LIGHTS_LEVEL, int(0.80 * 65535))
+            print("Morning startup")
+
+        await asyncio.sleep(60)  # check every minute
+
+async def main():
+    async with CrestronClient("10.11.4.155", 0x1a, username="admin", password="pw") as c:
+        await scheduler(c)
+
+asyncio.run(main())
+```
+
+### State Snapshot / Diagnostics
+
+Dump the current state of all known joins to a file:
+
+```python
+import asyncio
+import json
+from pycrestron import CrestronClient, SignalType
+
+async def dump_state():
+    client = CrestronClient("10.11.4.155", 0x1a, username="admin", password="pw")
+
+    # Subscribe to a wide range of joins to capture the state dump
+    for join in range(1, 201):
+        client.subscribe_digital(join, lambda v: None)
+        client.subscribe_analog(join, lambda v: None)
+        client.subscribe_serial(join, lambda v: None)
+
+    await client.start()
+
+    # Wait for initial state dump
+    await asyncio.sleep(3)
+
+    # Build snapshot from cache
+    snapshot = {"digital": {}, "analog": {}, "serial": {}}
+    for (sig_type, join), value in sorted(client._state_cache.items()):
+        if sig_type == SignalType.DIGITAL:
+            snapshot["digital"][join] = value
+        elif sig_type == SignalType.ANALOG:
+            snapshot["analog"][join] = value
+        elif sig_type == SignalType.SERIAL:
+            snapshot["serial"][join] = value
+
+    with open("crestron_state.json", "w") as f:
+        json.dump(snapshot, f, indent=2)
+
+    print(f"Dumped {sum(len(v) for v in snapshot.values())} signals to crestron_state.json")
+    await client.stop()
+
+asyncio.run(dump_state())
+```
+
+### Flask/FastAPI Web Bridge
+
+Expose Crestron joins as a REST API:
+
+```python
+from fastapi import FastAPI
+from contextlib import asynccontextmanager
+from pycrestron import CrestronClient
+
+client = CrestronClient("10.11.4.155", 0x1a, username="admin", password="pw")
+
+@asynccontextmanager
+async def lifespan(app):
+    # Subscribe to joins we want to expose
+    for join in range(1, 51):
+        client.subscribe_digital(join, lambda v: None)
+        client.subscribe_analog(join, lambda v: None)
+    await client.start()
+    yield
+    await client.stop()
+
+app = FastAPI(lifespan=lifespan)
+
+@app.get("/digital/{join}")
+async def get_digital(join: int):
+    return {"join": join, "value": client.get_digital(join)}
+
+@app.post("/digital/{join}/{value}")
+async def set_digital(join: int, value: bool):
+    await client.set_digital(join, value)
+    return {"ok": True}
+
+@app.get("/analog/{join}")
+async def get_analog(join: int):
+    return {"join": join, "value": client.get_analog(join)}
+
+@app.post("/analog/{join}/{value}")
+async def set_analog(join: int, value: int):
+    await client.set_analog(join, max(0, min(65535, value)))
+    return {"ok": True}
+
+@app.post("/press/{join}")
+async def press(join: int):
+    await client.press(join)
+    return {"ok": True}
+```
+
+Run with: `uvicorn bridge:app --host 0.0.0.0 --port 8000`
+
+### Home Assistant Climate Entity
+
+Control an HVAC system through Crestron joins:
+
+```python
+"""Crestron climate entity for Home Assistant."""
+from __future__ import annotations
+
+from homeassistant.components.climate import (
+    ClimateEntity,
+    ClimateEntityFeature,
+    HVACMode,
+)
+from homeassistant.const import UnitOfTemperature
+from homeassistant.core import callback
+
+from pycrestron import CrestronHub
+
+
+class CrestronThermostat(ClimateEntity):
+    """Thermostat controlled via Crestron joins."""
+
+    _attr_temperature_unit = UnitOfTemperature.FAHRENHEIT
+    _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT, HVACMode.COOL, HVACMode.AUTO]
+    _attr_supported_features = (
+        ClimateEntityFeature.TARGET_TEMPERATURE
+    )
+
+    def __init__(
+        self,
+        hub: CrestronHub,
+        name: str,
+        current_temp_join: int,   # analog: current temp * 10
+        setpoint_join: int,       # analog: setpoint * 10
+        mode_feedback_join: int,  # serial: "Off", "Heat", "Cool", "Auto"
+        mode_off_join: int,       # digital: press to set off
+        mode_heat_join: int,      # digital: press to set heat
+        mode_cool_join: int,      # digital: press to set cool
+        mode_auto_join: int,      # digital: press to set auto
+    ) -> None:
+        self._hub = hub
+        self._attr_name = name
+        self._attr_unique_id = f"crestron_climate_{current_temp_join}"
+        self._current_temp_join = current_temp_join
+        self._setpoint_join = setpoint_join
+        self._mode_feedback_join = mode_feedback_join
+        self._mode_joins = {
+            HVACMode.OFF: mode_off_join,
+            HVACMode.HEAT: mode_heat_join,
+            HVACMode.COOL: mode_cool_join,
+            HVACMode.AUTO: mode_auto_join,
+        }
+        self._current_temp = None
+        self._target_temp = None
+        self._hvac_mode = HVACMode.OFF
+
+    async def async_added_to_hass(self) -> None:
+        self._hub.register_analog(self._current_temp_join, self._temp_cb)
+        self._hub.register_analog(self._setpoint_join, self._setpoint_cb)
+        self._hub.register_serial(self._mode_feedback_join, self._mode_cb)
+        self._hub.on_availability(self._avail_cb)
+
+    @callback
+    def _temp_cb(self, value: int) -> None:
+        self._current_temp = value / 10  # e.g., 720 → 72.0°F
+        self.async_write_ha_state()
+
+    @callback
+    def _setpoint_cb(self, value: int) -> None:
+        self._target_temp = value / 10
+        self.async_write_ha_state()
+
+    @callback
+    def _mode_cb(self, value: str) -> None:
+        mode_map = {"Off": HVACMode.OFF, "Heat": HVACMode.HEAT,
+                     "Cool": HVACMode.COOL, "Auto": HVACMode.AUTO}
+        self._hvac_mode = mode_map.get(value, HVACMode.OFF)
+        self.async_write_ha_state()
+
+    @callback
+    def _avail_cb(self, available: bool) -> None:
+        self._attr_available = available
+        self.async_write_ha_state()
+
+    @property
+    def current_temperature(self) -> float | None:
+        return self._current_temp
+
+    @property
+    def target_temperature(self) -> float | None:
+        return self._target_temp
+
+    @property
+    def hvac_mode(self) -> HVACMode:
+        return self._hvac_mode
+
+    async def async_set_temperature(self, **kwargs) -> None:
+        temp = kwargs.get("temperature")
+        if temp is not None:
+            await self._hub.set_analog(self._setpoint_join, int(temp * 10))
+
+    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        join = self._mode_joins.get(hvac_mode)
+        if join:
+            await self._hub.press(join)
+```
+
+### Home Assistant Cover Entity (Shades/Blinds)
+
+Control motorized shades with open/close/stop and position:
+
+```python
+"""Crestron cover entity for Home Assistant."""
+from __future__ import annotations
+
+from homeassistant.components.cover import (
+    CoverEntity,
+    CoverEntityFeature,
+)
+from homeassistant.core import callback
+
+from pycrestron import CrestronHub
+
+
+class CrestronShade(CoverEntity):
+    """Motorized shade via Crestron joins."""
+
+    _attr_supported_features = (
+        CoverEntityFeature.OPEN
+        | CoverEntityFeature.CLOSE
+        | CoverEntityFeature.STOP
+        | CoverEntityFeature.SET_POSITION
+    )
+
+    def __init__(
+        self,
+        hub: CrestronHub,
+        name: str,
+        open_join: int,       # digital: press to open
+        close_join: int,      # digital: press to close
+        stop_join: int,       # digital: press to stop
+        position_fb_join: int, # analog: 0=closed, 65535=open
+        position_set_join: int, # analog: set position
+    ) -> None:
+        self._hub = hub
+        self._attr_name = name
+        self._attr_unique_id = f"crestron_shade_{position_fb_join}"
+        self._open_join = open_join
+        self._close_join = close_join
+        self._stop_join = stop_join
+        self._position_fb_join = position_fb_join
+        self._position_set_join = position_set_join
+        self._position = 0  # 0-100
+
+    async def async_added_to_hass(self) -> None:
+        self._hub.register_analog(self._position_fb_join, self._position_cb)
+        self._hub.on_availability(self._avail_cb)
+
+    @callback
+    def _position_cb(self, value: int) -> None:
+        self._position = int(value / 65535 * 100)
+        self.async_write_ha_state()
+
+    @callback
+    def _avail_cb(self, available: bool) -> None:
+        self._attr_available = available
+        self.async_write_ha_state()
+
+    @property
+    def current_cover_position(self) -> int:
+        return self._position
+
+    @property
+    def is_closed(self) -> bool:
+        return self._position == 0
+
+    async def async_open_cover(self, **kwargs) -> None:
+        await self._hub.press(self._open_join)
+
+    async def async_close_cover(self, **kwargs) -> None:
+        await self._hub.press(self._close_join)
+
+    async def async_stop_cover(self, **kwargs) -> None:
+        await self._hub.press(self._stop_join)
+
+    async def async_set_cover_position(self, **kwargs) -> None:
+        position = kwargs.get("position", 0)
+        await self._hub.set_analog(self._position_set_join, int(position / 100 * 65535))
+```
+
+### Macro Execution
+
+Chain multiple actions with delays — like a Crestron macro but from Python:
+
+```python
+import asyncio
+from pycrestron import CrestronClient
+
+async def run_macro(client, steps):
+    """Execute a list of (action, delay) steps.
+
+    Each step is a tuple: (coroutine, delay_seconds)
+    """
+    for action, delay in steps:
+        await action
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+async def main():
+    async with CrestronClient("10.11.4.155", 0x1a, username="admin", password="pw") as c:
+        # "Start Presentation" macro
+        await run_macro(c, [
+            (c.set_digital(1, True),   0.5),   # Projector on
+            (c.press(2),               2.0),   # Screen down (wait for motor)
+            (c.set_analog(1, 42598),   0.5),   # Volume to 65%
+            (c.press(10),              0.0),   # Select HDMI 1
+            (c.set_serial(1, "Presentation Mode"), 0),
+        ])
+
+        print("Presentation started!")
+
+        # Wait, then shut down
+        await asyncio.sleep(3600)  # 1 hour
+
+        # "End Presentation" macro
+        await run_macro(c, [
+            (c.set_digital(1, False),  0.5),   # Projector off
+            (c.press(3),               0.5),   # Screen up
+            (c.set_analog(1, 0),       0.0),   # Volume to 0
+            (c.set_serial(1, "Idle"),  0),
+        ])
+
+asyncio.run(main())
+```
+
+### Connection Health Monitor
+
+Log connection health metrics for operational monitoring:
+
+```python
+import asyncio
+from datetime import datetime
+from pycrestron import CrestronClient, ConnectionState
+
+async def health_monitor():
+    client = CrestronClient(
+        "10.11.4.155", 0x1a,
+        username="admin", password="pw",
+        reconnect_interval=5.0,
+    )
+
+    connect_count = 0
+    disconnect_count = 0
+    last_connect = None
+
+    original_on_connect = None
+
+    def on_connect():
+        nonlocal connect_count, last_connect
+        connect_count += 1
+        last_connect = datetime.now()
+        print(f"[{last_connect:%Y-%m-%d %H:%M:%S}] CONNECTED (#{connect_count})")
+
+    def on_disconnect():
+        nonlocal disconnect_count
+        disconnect_count += 1
+        now = datetime.now()
+        uptime = (now - last_connect) if last_connect else "N/A"
+        print(f"[{now:%Y-%m-%d %H:%M:%S}] DISCONNECTED (#{disconnect_count}) uptime={uptime}")
+
+    client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
+
+    await client.start()
+
+    try:
+        while True:
+            status = "CONNECTED" if client.connected else "DISCONNECTED"
+            print(f"[Health] {status} | connects={connect_count} disconnects={disconnect_count}")
+            await asyncio.sleep(60)
+    except KeyboardInterrupt:
+        await client.stop()
+
+asyncio.run(health_monitor())
+```
+
+---
+
 ## Troubleshooting
 
 ### "Connection refused" or timeout
