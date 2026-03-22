@@ -1,0 +1,11 @@
+{
+  "domain": "crestron",
+  "name": "Crestron",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/your-repo/pycrestron",
+  "iot_class": "local_push",
+  "requirements": ["pycrestron==0.1.0"],
+  "version": "1.0.0"
+}

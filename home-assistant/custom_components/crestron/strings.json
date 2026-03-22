@@ -1,0 +1,19 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Crestron Processor",
+        "data": {
+          "host": "Processor IP Address",
+          "ip_id": "IP ID (hex, e.g. 0x1a)",
+          "port": "WebSocket Port",
+          "username": "Username",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect. Check IP, credentials, and that the program is running."
+    }
+  }
+}
