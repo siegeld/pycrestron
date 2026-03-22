@@ -14,6 +14,7 @@ from .exceptions import CrestronConnectionError, CrestronTimeoutError, ProtocolE
 from .models import ConnectionState
 from .protocol import (
     CIPPacketType,
+    CresnetType,
     build_analog_payload,
     build_data_packet,
     build_device_router_connect,
@@ -21,6 +22,8 @@ from .protocol import (
     build_disconnect,
     build_heartbeat,
     build_serial_payload,
+    build_update_request,
+    build_update_request_response,
     parse_auth_response,
     parse_cip_header,
     parse_connect_response,
@@ -307,6 +310,8 @@ class CIPConnection:
             await self._handle_heartbeat(payload)
         elif packet_type == CIPPacketType.HEARTBEAT_RESPONSE:
             pass  # Server acknowledged our heartbeat — timestamp already updated
+        elif packet_type == CIPPacketType.DATA:
+            await self._handle_data_commands(payload)
         elif packet_type == CIPPacketType.DISCONNECT:
             _LOGGER.info("Server sent DISCONNECT")
             await self._cleanup()
@@ -335,6 +340,17 @@ class CIPConnection:
         self._state = ConnectionState.CONNECTED
         self._connect_event.set()
 
+        # Send UPDATE_REQUEST so the processor starts sending join feedback
+        asyncio.ensure_future(self._send_update_request())
+
+    async def _send_update_request(self) -> None:
+        """Send UPDATE_REQUEST to trigger the processor to send all join states."""
+        try:
+            await self._send_raw(build_update_request(self._handle))
+            _LOGGER.debug("Sent UPDATE_REQUEST")
+        except CrestronConnectionError as exc:
+            _LOGGER.error("Failed to send UPDATE_REQUEST: %s", exc)
+
     def _handle_auth_response(self, payload: bytes) -> None:
         try:
             access_level = parse_auth_response(payload)
@@ -351,6 +367,33 @@ class CIPConnection:
             _LOGGER.info("Authenticated (access_level=%d)", access_level)
             self._state = ConnectionState.CONNECTED
             self._connect_event.set()
+
+    async def _handle_data_commands(self, payload: bytes) -> None:
+        """Check DATA payloads for CRESNET command packets and respond."""
+        if len(payload) < 4:
+            return
+        # Skip 2-byte handle, look for command sub-packets
+        # Command format: [len=0x02][type=0x03][status]
+        pos = 2
+        while pos + 2 < len(payload):
+            cresnet_len = payload[pos]
+            if cresnet_len == 0:
+                break
+            if pos + 1 + cresnet_len > len(payload):
+                break
+            cresnet_type = payload[pos + 1]
+            if cresnet_type == CresnetType.COMMAND and cresnet_len >= 2:
+                status = payload[pos + 2] if pos + 2 < len(payload) else 0
+                if status == 0x1C:
+                    # END_OF_JOIN_STATUS_QUERY — respond with 0x1D
+                    _LOGGER.debug("Received END_OF_JOIN_STATUS_QUERY, sending response")
+                    try:
+                        await self._send_raw(
+                            build_update_request_response(self._handle)
+                        )
+                    except CrestronConnectionError:
+                        pass
+            pos += 1 + cresnet_len
 
     async def _handle_heartbeat(self, payload: bytes) -> None:
         """Respond to server heartbeat with HEARTBEAT_RESPONSE."""

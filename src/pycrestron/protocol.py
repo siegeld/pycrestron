@@ -60,46 +60,32 @@ class CresnetType(IntEnum):
 # Connection mode/flag constants
 # ---------------------------------------------------------------------------
 
-# Connect mode flags (low byte)
-CONNECT_MASTER_LIST = 0x0001
-CONNECT_WRITER = 0x0002
-CONNECT_DISCONNECT_AT_TIMEOUT = 0x0004
-CONNECT_EXTENDED_SERVICE = 0x0008
-CONNECT_PEER_TO_PEER = 0x0010
-CONNECT_LICENSE = 0x0020
-CONNECT_HEARTBEAT = 0x0040
-CONNECT_TERMINATE = 0x0080
+# Connect mode flags
+CONNECT_HEARTBEAT = 0x40
 
-# Type flags (high byte of type field)
-TYPE_HEARTBEAT = 0x10
-TYPE_RCB = 0x20
-TYPE_EXTENDED_LENGTH = 0x40
-TYPE_UNICODE = 0x80
-TYPE_SERIAL_SIZE_256 = 0x01
-TYPE_SERIAL_SIZE_1024 = 0x02
-TYPE_SERIAL_SIZE_2048 = 0x04
-TYPE_SERIAL_SIZE_4096 = 0x08
+# Type flags — exact values from CH5 WebXPanel JS
+TYPE_SERIAL_SIZE_256 = 0x01  # K
+TYPE_RCB = 0x20              # part of Q
+TYPE_HEARTBEAT = 0x10        # part of Q
+TYPE_EXTENDED_LENGTH = 0x40  # z
+TYPE_UNICODE = 0x80          # q
 
-# Extra flags
-EXTRA_PROGRAM_INSTANCE_ID = 0x00000001
-EXTRA_AUTHENTICATE = 0x00000002
-EXTRA_VALIDITY_CHECK = 0x00000004
-EXTRA_REQUEST_LICENSES = 0x00000008
-EXTRA_AUTHENTICATION_TOKEN = 0x00000010
+# Extra flags — exact values from CH5 WebXPanel JS
+EXTRA_PROGRAM_INSTANCE_ID = 0x01  # $
+EXTRA_AUTHENTICATE = 0x10         # ee
+EXTRA_TOKEN_SOURCE = 0x20         # te
+EXTRA_AUTH_TOKEN_DATA = 0x40      # ne
 
-# Default connection parameters
-DEFAULT_MODE = (
-    CONNECT_WRITER
-    | CONNECT_EXTENDED_SERVICE
-    | CONNECT_HEARTBEAT
-)
-DEFAULT_TYPE_HI = (
-    TYPE_HEARTBEAT
-    | TYPE_EXTENDED_LENGTH
+# Default connection parameters (match CH5 WebXPanel exactly)
+DEFAULT_MODE = CONNECT_HEARTBEAT  # 0x40
+DEFAULT_TYPE_HI = (               # K + q + z + Q = 0xF1
+    TYPE_SERIAL_SIZE_256
     | TYPE_UNICODE
-    | TYPE_SERIAL_SIZE_4096
+    | TYPE_EXTENDED_LENGTH
+    | TYPE_HEARTBEAT
+    | TYPE_RCB
 )
-DEFAULT_TYPE_LO = TYPE_SERIAL_SIZE_256
+DEFAULT_TYPE_LO = 0x01            # Z
 
 
 # ---------------------------------------------------------------------------
@@ -126,32 +112,38 @@ def build_device_router_connect(
     """Build DEVICE_ROUTER_CONNECT (0x26) payload.
 
     Layout (213 fixed bytes + variable auth):
-      [handle 2B][mode 1B][type 2B][extra_flags 4B][mac 6B]
-      [device_make 50B][device_model 50B][program_name 32B][hostname 64B]
+      [ip_id 2B][mode 1B][type 2B][extra_flags 4B][mac 6B]
+      [device_make 50B][device_model 50B][room_id 32B][hostname 64B]
       [auth_len 2B][auth_data ...]
     """
-    handle = struct.pack(">H", 0x0000)
+    ip_id_bytes = struct.pack(">H", ip_id)
 
     mode = DEFAULT_MODE
     type_field = struct.pack(">BB", DEFAULT_TYPE_HI, DEFAULT_TYPE_LO)
 
-    extra_flags = EXTRA_AUTHENTICATE | EXTRA_AUTHENTICATION_TOKEN
+    extra_flags = EXTRA_AUTHENTICATE | EXTRA_TOKEN_SOURCE
+    if auth_token:
+        extra_flags |= EXTRA_AUTH_TOKEN_DATA
+    if room_id:
+        extra_flags |= EXTRA_PROGRAM_INSTANCE_ID
     extra = struct.pack(">I", extra_flags)
 
     mac = bytes(6)  # 00:00:00:00:00:00
 
-    device_make = b"pycrestron".ljust(50, b"\x00")[:50]
-    device_model = b"Python CIP Client".ljust(50, b"\x00")[:50]
+    device_make = b"Crestron".ljust(50, b"\x00")[:50]
+    device_model = b"WebXPanel".ljust(50, b"\x00")[:50]
     program_name = room_id.encode("utf-8")[:32].ljust(32, b"\x00")
-    hostname = b"pycrestron".ljust(64, b"\x00")[:64]
+    hostname = b"Hostname".ljust(64, b"\x00")[:64]
 
+    # Auth token format: "Crestron:<tokenSource>:<jwt>"
     auth_data = b""
     if auth_token:
-        auth_data = auth_token.encode("utf-8")
+        auth_str = f"Crestron:CSSelf:{auth_token}"
+        auth_data = auth_str.encode("utf-8")
     auth_len = struct.pack(">H", len(auth_data))
 
     payload = (
-        handle
+        ip_id_bytes
         + struct.pack("B", mode)
         + type_field
         + extra
@@ -222,6 +214,27 @@ def build_serial_payload(join: int, value: str) -> bytes:
 def build_data_packet(handle: int, cresnet_payload: bytes) -> bytes:
     """Wrap a CRESNET payload in a CIP DATA (0x05) packet."""
     return build_cip_packet(CIPPacketType.DATA, cresnet_payload, handle=handle)
+
+
+def build_update_request(handle: int) -> bytes:
+    """Build an UPDATE_REQUEST — tells the processor to send all join states.
+
+    Must be sent after CONNECT_RESPONSE to receive feedback.
+    Payload: [0x02][0x03][0x00] = CRESNET command "update request".
+    """
+    return build_cip_packet(
+        CIPPacketType.DATA, b"\x02\x03\x00", handle=handle
+    )
+
+
+def build_update_request_response(handle: int) -> bytes:
+    """Build END_OF_JOIN_STATUS_RESPONSE (0x1D).
+
+    Sent in response to END_OF_JOIN_STATUS_QUERY (0x1C) from the processor.
+    """
+    return build_cip_packet(
+        CIPPacketType.DATA, b"\x02\x03\x1d", handle=handle
+    )
 
 
 # ---------------------------------------------------------------------------
