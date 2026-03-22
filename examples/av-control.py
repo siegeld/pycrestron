@@ -52,6 +52,17 @@ COMMANDS = {
 
 ALL_ACTIONS = {**SOURCES, **COMMANDS}
 
+# Reverse lookup: join number → friendly name (for snoop display)
+DIGITAL_NAMES = {join: name for name, join in ALL_ACTIONS.items()}
+ANALOG_NAMES: dict[int, str] = {
+    # Add known analog feedback joins here, e.g.:
+    # 1: "master-vol",
+}
+SERIAL_NAMES: dict[int, str] = {
+    # Add known serial feedback joins here, e.g.:
+    # 1: "source-name",
+}
+
 
 def action_names() -> list[str]:
     return list(ALL_ACTIONS.keys())
@@ -241,15 +252,15 @@ async def do_snoop(raw: bool) -> None:
     from pycrestron.auth import fetch_auth_token
     from datetime import datetime
 
-    click.echo(click.style(f"  Connecting to {HOST} IP ID 0x{IP_ID:02x}...", fg="cyan"))
+    print(f"  Connecting to {HOST} IP ID 0x{IP_ID:02x}...")
     token = await fetch_auth_token(HOST, USERNAME, PASSWORD)
 
     async with CIPConnection(HOST, IP_ID, port=49200) as conn:
-        click.echo(click.style("  Connected — snooping all traffic (Ctrl+C to stop)\n", fg="green"))
+        print("  Connected — snooping all traffic (Ctrl+C to stop)\n")
 
         def on_packet(ptype: int, payload: bytes) -> None:
             ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            name = PACKET_NAMES.get(ptype, f"0x{ptype:02x}")
+            pname = PACKET_NAMES.get(ptype, f"0x{ptype:02x}")
 
             # Parse signal data from DATA packets
             if ptype in DATA_TYPES and len(payload) > 2:
@@ -262,19 +273,26 @@ async def do_snoop(raw: bool) -> None:
                 for e in events:
                     stype = e.signal_type.value
                     val = e.value
+                    name = ""
+                    if stype == "digital":
+                        name = DIGITAL_NAMES.get(e.join, "")
+                    elif stype == "analog":
+                        name = ANALOG_NAMES.get(e.join, "")
+                    elif stype == "serial":
+                        name = SERIAL_NAMES.get(e.join, "")
+                    label = f" {name}" if name else ""
                     if stype == "analog":
-                        pct = f" ({val / 65535 * 100:.0f}%)"
+                        pct = val / 65535 * 100
+                        print(f"  {ts}  {stype:8s} {e.join:3d}{label:16s}  {val:5d} ({pct:.0f}%)")
                     else:
-                        pct = ""
-                    color = {"digital": "yellow", "analog": "cyan", "serial": "magenta"}[stype]
-                    click.echo(f"  {ts}  {click.style(f'{stype:8s}', fg=color)} join={e.join:<5d} value={val}{pct}")
+                        print(f"  {ts}  {stype:8s} {e.join:3d}{label:16s}  {val}")
 
                 if raw and events:
-                    click.echo(click.style(f"           raw: {payload.hex()}", fg="bright_black"))
+                    print(f"           raw: {payload.hex()}")
             elif raw:
-                click.echo(f"  {ts}  {click.style(name, fg='bright_black'):20s} len={len(payload):4d}  {payload[:32].hex()}")
+                print(f"  {ts}  {pname:20s} len={len(payload):4d}  {payload[:32].hex()}")
             elif ptype not in (CIPPacketType.HEARTBEAT, CIPPacketType.HEARTBEAT_RESPONSE):
-                click.echo(f"  {ts}  {click.style(name, fg='bright_black'):20s} len={len(payload)}")
+                print(f"  {ts}  {pname:20s} len={len(payload)}")
 
         conn.on_packet(on_packet)
 
@@ -405,9 +423,20 @@ async def interactive_loop() -> None:
         for e in events:
             stype = e.signal_type.value
             val = e.value
-            extra = f" ({val / 65535 * 100:.0f}%)" if stype == "analog" else ""
-            color = {"digital": "yellow", "analog": "cyan", "serial": "magenta"}[stype]
-            click.echo(f"  {ts}  {click.style(f'{stype:8s}', fg=color)} join={e.join:<5d} value={val}{extra}")
+            # Look up friendly name from join map
+            name = ""
+            if stype == "digital":
+                name = DIGITAL_NAMES.get(e.join, "")
+            elif stype == "analog":
+                name = ANALOG_NAMES.get(e.join, "")
+            elif stype == "serial":
+                name = SERIAL_NAMES.get(e.join, "")
+            label = f" {name}" if name else ""
+            if stype == "analog":
+                pct = val / 65535 * 100
+                print(f"  {ts}  {stype:8s} {e.join:3d}{label:16s}  {val:5d} ({pct:.0f}%)")
+            else:
+                print(f"  {ts}  {stype:8s} {e.join:3d}{label:16s}  {val}")
 
     def _prompt_text():
         if client and client.connected:
