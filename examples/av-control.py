@@ -46,8 +46,6 @@ SOURCES = {
 COMMANDS = {
     "tv-on": 30,
     "tv-off": 31,
-    "screen-down": 40,
-    "screen-up": 41,
 }
 
 ALL_ACTIONS = {**SOURCES, **COMMANDS}
@@ -70,8 +68,9 @@ def action_names() -> list[str]:
 
 async def do_press(action: str) -> None:
     join = ALL_ACTIONS[action]
+    duration = 0.1
     async with CrestronClient(HOST, IP_ID, username=USERNAME, password=PASSWORD, auto_reconnect=False) as client:
-        await client.press(join)
+        await client.press(join, duration)
         click.echo(click.style(f"  Pressed join {join}", fg="green"))
 
 

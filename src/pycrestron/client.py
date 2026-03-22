@@ -300,10 +300,15 @@ class CrestronClient:
             raise CrestronConnectionError("Not connected")
         await self._conn.send_digital(join, value)
 
-    async def press(self, join: int) -> None:
-        """Momentary press: set True, wait 100ms, set False."""
+    async def press(self, join: int, duration: float = 0.1) -> None:
+        """Momentary press: set True, wait, set False.
+
+        Args:
+            join: Digital join number (1-based).
+            duration: Hold time in seconds (default 0.1).
+        """
         await self.set_digital(join, True)
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(duration)
         await self.set_digital(join, False)
 
     async def set_analog(self, join: int, value: int) -> None:

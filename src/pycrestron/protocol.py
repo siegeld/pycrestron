@@ -181,11 +181,13 @@ def build_disconnect(handle: int) -> bytes:
 def build_digital_payload(join: int, value: bool) -> bytes:
     """Build a DATA (0x05) packet for a digital join press/release.
 
-    Join encoding: low_byte = join & 0xFF, high_byte = (join >> 8) & 0x7F.
+    Joins are 1-based externally but 0-based on the wire.
+    Join encoding: low_byte = channel & 0xFF, high_byte = (channel >> 8) & 0x7F.
     Press: high_byte bit 7 clear.  Release: high_byte bit 7 set.
     """
-    low = join & 0xFF
-    high = (join >> 8) & 0x7F
+    channel = join - 1  # 1-based join → 0-based wire channel
+    low = channel & 0xFF
+    high = (channel >> 8) & 0x7F
     if not value:
         high |= 0x80
     cresnet = bytes([0x03, CresnetType.DIGITAL, low, high])
@@ -193,21 +195,27 @@ def build_digital_payload(join: int, value: bool) -> bytes:
 
 
 def build_analog_payload(join: int, value: int) -> bytes:
-    """Build CRESNET payload for a symmetrical analog join (type 0x14)."""
+    """Build CRESNET payload for a symmetrical analog join (type 0x14).
+
+    Joins are 1-based externally but 0-based on the wire.
+    """
+    channel = join - 1  # 1-based join → 0-based wire channel
     value = max(0, min(65535, value))
-    cresnet = struct.pack(">BBHH", 0x05, CresnetType.SYMMETRICAL_ANALOG, join, value)
+    cresnet = struct.pack(">BBHH", 0x05, CresnetType.SYMMETRICAL_ANALOG, channel, value)
     return cresnet
 
 
 def build_serial_payload(join: int, value: str) -> bytes:
     """Build CRESNET payload for a serial join (type 0x15).
 
+    Joins are 1-based externally but 0-based on the wire.
     Flags 0x03 = start + end (single-shot message).
     """
+    channel = join - 1  # 1-based join → 0-based wire channel
     data = value.encode("utf-8")
     # length byte = 1(type) + 2(channel) + 1(flags) + len(data)
     cresnet_len = 1 + 2 + 1 + len(data)
-    buf = struct.pack(">BBHB", cresnet_len, CresnetType.SERIAL, join, 0x03) + data
+    buf = struct.pack(">BBHB", cresnet_len, CresnetType.SERIAL, channel, 0x03) + data
     return buf
 
 
@@ -373,13 +381,15 @@ def _parse_digital_chunk(chunk: bytes, events: list[SignalEvent]) -> None:
     """Parse digital I/O bytes into SignalEvents.
 
     Each pair: [low_byte][high_byte].
-    Join = (high & 0x7F) << 8 | low.  Value = !(high & 0x80).
+    Wire channel = (high & 0x7F) << 8 | low (0-based).
+    Join = channel + 1 (1-based).  Value = !(high & 0x80).
     """
     i = 0
     while i + 1 < len(chunk):
         low = chunk[i]
         high = chunk[i + 1]
-        join = ((high & 0x7F) << 8) | low
+        channel = ((high & 0x7F) << 8) | low
+        join = channel + 1  # 0-based wire channel → 1-based join
         value = (high & 0x80) == 0  # bit 7 clear = press/true
         events.append(SignalEvent(SignalType.DIGITAL, join, value))
         i += 2
@@ -388,6 +398,7 @@ def _parse_digital_chunk(chunk: bytes, events: list[SignalEvent]) -> None:
 def _parse_analog_chunk(chunk: bytes, events: list[SignalEvent]) -> None:
     """Parse type-0x01 analog I/O.
 
+    Wire channels are 0-based; joins are 1-based (channel + 1).
     The format depends on the parent cresnet_len:
       len=2 → 1-byte channel, 1-byte value
       len=3 → 1-byte channel, 2-byte value
@@ -396,35 +407,41 @@ def _parse_analog_chunk(chunk: bytes, events: list[SignalEvent]) -> None:
     """
     n = len(chunk)
     if n == 2:
-        events.append(SignalEvent(SignalType.ANALOG, chunk[0], chunk[1]))
+        events.append(SignalEvent(SignalType.ANALOG, chunk[0] + 1, chunk[1]))
     elif n == 3:
         channel = chunk[0]
         value = struct.unpack(">H", chunk[1:3])[0]
-        events.append(SignalEvent(SignalType.ANALOG, channel, value))
+        events.append(SignalEvent(SignalType.ANALOG, channel + 1, value))
     elif n >= 4:
         channel = struct.unpack(">H", chunk[0:2])[0]
         value = struct.unpack(">H", chunk[2:4])[0]
-        events.append(SignalEvent(SignalType.ANALOG, channel, value))
+        events.append(SignalEvent(SignalType.ANALOG, channel + 1, value))
         # Multi-channel: remaining pairs
         i = 4
         while i + 3 < n:
             ch = struct.unpack(">H", chunk[i: i + 2])[0]
             val = struct.unpack(">H", chunk[i + 2: i + 4])[0]
-            events.append(SignalEvent(SignalType.ANALOG, ch, val))
+            events.append(SignalEvent(SignalType.ANALOG, ch + 1, val))
             i += 4
 
 
 def _parse_sym_analog_chunk(chunk: bytes, events: list[SignalEvent]) -> None:
-    """Parse symmetrical analog (0x14): [channel_hi][channel_lo][value_hi][value_lo]."""
+    """Parse symmetrical analog (0x14): [channel_hi][channel_lo][value_hi][value_lo].
+
+    Wire channels are 0-based; joins are 1-based (channel + 1).
+    """
     if len(chunk) < 4:
         return
     channel = struct.unpack(">H", chunk[0:2])[0]
     value = struct.unpack(">H", chunk[2:4])[0]
-    events.append(SignalEvent(SignalType.ANALOG, channel, value))
+    events.append(SignalEvent(SignalType.ANALOG, channel + 1, value))
 
 
 def _parse_serial_chunk(chunk: bytes, events: list[SignalEvent]) -> None:
-    """Parse serial I/O (0x15 or 0x34): [channel_hi][channel_lo][flags][data...]."""
+    """Parse serial I/O (0x15 or 0x34): [channel_hi][channel_lo][flags][data...].
+
+    Wire channels are 0-based; joins are 1-based (channel + 1).
+    """
     if len(chunk) < 3:
         return
     channel = struct.unpack(">H", chunk[0:2])[0]
@@ -434,7 +451,7 @@ def _parse_serial_chunk(chunk: bytes, events: list[SignalEvent]) -> None:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         text = data.decode("latin-1")
-    events.append(SignalEvent(SignalType.SERIAL, channel, text))
+    events.append(SignalEvent(SignalType.SERIAL, channel + 1, text))
 
 
 def _parse_smart_object_chunk(chunk: bytes, events: list[SignalEvent]) -> None:

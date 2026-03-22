@@ -200,17 +200,20 @@ class MockCP4:
 
             if ctype == CresnetType.DIGITAL and len(chunk) >= 2:
                 low, high = chunk[0], chunk[1]
-                join = ((high & 0x7F) << 8) | low
+                channel = ((high & 0x7F) << 8) | low
+                join = channel + 1  # 0-based wire → 1-based join
                 value = (high & 0x80) == 0
                 self.received_digitals[join] = value
             elif ctype == CresnetType.SYMMETRICAL_ANALOG and len(chunk) >= 4:
                 channel = struct.unpack(">H", chunk[0:2])[0]
+                join = channel + 1  # 0-based wire → 1-based join
                 value = struct.unpack(">H", chunk[2:4])[0]
-                self.received_analogs[channel] = value
+                self.received_analogs[join] = value
             elif ctype == CresnetType.SERIAL and len(chunk) >= 3:
                 channel = struct.unpack(">H", chunk[0:2])[0]
+                join = channel + 1  # 0-based wire → 1-based join
                 text = chunk[3:].decode("utf-8", errors="replace")
-                self.received_serials[channel] = text
+                self.received_serials[join] = text
 
     async def _send_state_dump(self, ws: websockets.WebSocketServerProtocol) -> None:
         """Send initial state as DATA packets."""
@@ -228,9 +231,10 @@ class MockCP4:
     async def send_digital_feedback(
         self, join: int, value: bool, ws: websockets.WebSocketServerProtocol | None = None
     ) -> None:
-        """Send digital feedback to client(s)."""
-        low = join & 0xFF
-        high = (join >> 8) & 0x7F
+        """Send digital feedback to client(s). Join is 1-based."""
+        channel = join - 1  # 1-based join → 0-based wire channel
+        low = channel & 0xFF
+        high = (channel >> 8) & 0x7F
         if not value:
             high |= 0x80
         cresnet = bytes([0x03, CresnetType.DIGITAL, low, high])
@@ -242,8 +246,9 @@ class MockCP4:
     async def send_analog_feedback(
         self, join: int, value: int, ws: websockets.WebSocketServerProtocol | None = None
     ) -> None:
-        """Send analog feedback to client(s)."""
-        cresnet = struct.pack(">BBHH", 0x05, CresnetType.SYMMETRICAL_ANALOG, join, value)
+        """Send analog feedback to client(s). Join is 1-based."""
+        channel = join - 1  # 1-based join → 0-based wire channel
+        cresnet = struct.pack(">BBHH", 0x05, CresnetType.SYMMETRICAL_ANALOG, channel, value)
         pkt = build_cip_packet(
             CIPPacketType.DATA, cresnet, handle=self._client_handle
         )
@@ -252,10 +257,11 @@ class MockCP4:
     async def send_serial_feedback(
         self, join: int, value: str, ws: websockets.WebSocketServerProtocol | None = None
     ) -> None:
-        """Send serial feedback to client(s)."""
+        """Send serial feedback to client(s). Join is 1-based."""
+        channel = join - 1  # 1-based join → 0-based wire channel
         data = value.encode("utf-8")
         cresnet_len = 1 + 2 + 1 + len(data)
-        cresnet = struct.pack(">BBHB", cresnet_len, CresnetType.SERIAL, join, 0x03) + data
+        cresnet = struct.pack(">BBHB", cresnet_len, CresnetType.SERIAL, channel, 0x03) + data
         pkt = build_cip_packet(
             CIPPacketType.DATA, cresnet, handle=self._client_handle
         )

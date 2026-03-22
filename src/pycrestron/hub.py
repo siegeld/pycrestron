@@ -104,8 +104,8 @@ class CrestronHub:
     async def set_digital(self, join: int, value: bool) -> None:
         await self._client.set_digital(join, value)
 
-    async def press(self, join: int) -> None:
-        await self._client.press(join)
+    async def press(self, join: int, duration: float = 0.1) -> None:
+        await self._client.press(join, duration)
 
     async def set_analog(self, join: int, value: int) -> None:
         await self._client.set_analog(join, value)

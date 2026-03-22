@@ -53,38 +53,42 @@ class TestBuildCIPPacket:
 class TestBuildDigitalPayload:
     def test_press_join_1(self):
         p = build_digital_payload(1, True)
-        assert p == bytes([0x03, 0x00, 0x01, 0x00])
+        # join=1 → wire channel=0 → low=0x00, high=0x00
+        assert p == bytes([0x03, 0x00, 0x00, 0x00])
 
     def test_release_join_1(self):
         p = build_digital_payload(1, False)
-        assert p == bytes([0x03, 0x00, 0x01, 0x80])
+        # join=1 → wire channel=0 → low=0x00, high=0x80
+        assert p == bytes([0x03, 0x00, 0x00, 0x80])
 
     def test_press_join_256(self):
-        # join 256: low=0x00, high=0x01
+        # join=256 → wire channel=255 → low=0xFF, high=0x00
         p = build_digital_payload(256, True)
-        assert p == bytes([0x03, 0x00, 0x00, 0x01])
+        assert p == bytes([0x03, 0x00, 0xFF, 0x00])
 
     def test_release_join_256(self):
         p = build_digital_payload(256, False)
-        assert p == bytes([0x03, 0x00, 0x00, 0x81])
+        assert p == bytes([0x03, 0x00, 0xFF, 0x80])
 
     def test_press_join_5(self):
         p = build_digital_payload(5, True)
-        assert p == bytes([0x03, 0x00, 0x05, 0x00])
+        # join=5 → wire channel=4 → low=0x04, high=0x00
+        assert p == bytes([0x03, 0x00, 0x04, 0x00])
 
 
 class TestBuildAnalogPayload:
     def test_zero(self):
         p = build_analog_payload(1, 0)
-        assert p == bytes([0x05, 0x14, 0x00, 0x01, 0x00, 0x00])
+        # join=1 → wire channel=0
+        assert p == bytes([0x05, 0x14, 0x00, 0x00, 0x00, 0x00])
 
     def test_max(self):
         p = build_analog_payload(1, 65535)
-        assert p == bytes([0x05, 0x14, 0x00, 0x01, 0xFF, 0xFF])
+        assert p == bytes([0x05, 0x14, 0x00, 0x00, 0xFF, 0xFF])
 
     def test_half(self):
         p = build_analog_payload(1, 32768)
-        assert p == bytes([0x05, 0x14, 0x00, 0x01, 0x80, 0x00])
+        assert p == bytes([0x05, 0x14, 0x00, 0x00, 0x80, 0x00])
 
     def test_clamp_negative(self):
         p = build_analog_payload(1, -100)
@@ -99,7 +103,7 @@ class TestBuildAnalogPayload:
     def test_high_join(self):
         p = build_analog_payload(300, 100)
         channel = struct.unpack(">H", p[2:4])[0]
-        assert channel == 300
+        assert channel == 299  # join 300 → wire channel 299
 
 
 class TestBuildSerialPayload:
@@ -108,7 +112,7 @@ class TestBuildSerialPayload:
         # len byte = 1(type) + 2(channel) + 1(flags) + 2(data) = 6
         assert p[0] == 6
         assert p[1] == CresnetType.SERIAL
-        assert struct.unpack(">H", p[2:4])[0] == 1
+        assert struct.unpack(">H", p[2:4])[0] == 0  # join=1 → wire channel=0
         assert p[4] == 0x03  # start + end flags
         assert p[5:] == b"Hi"
 
@@ -235,8 +239,8 @@ class TestParseAuthResponse:
 
 class TestParseCresnetSignals:
     def test_digital_press(self):
-        # cresnet_len=3, type=0x00, low=5, high=0x00 (press)
-        data = bytes([0x03, 0x00, 0x05, 0x00])
+        # Wire channel 4 → join 5 (0-based wire + 1)
+        data = bytes([0x03, 0x00, 0x04, 0x00])
         events = parse_cresnet_signals(data)
         assert len(events) == 1
         assert events[0].signal_type == SignalType.DIGITAL
@@ -244,28 +248,28 @@ class TestParseCresnetSignals:
         assert events[0].value is True
 
     def test_digital_release(self):
-        # high=0x80 → release
-        data = bytes([0x03, 0x00, 0x05, 0x80])
+        # Wire channel 4, high bit set → release
+        data = bytes([0x03, 0x00, 0x04, 0x80])
         events = parse_cresnet_signals(data)
         assert len(events) == 1
         assert events[0].value is False
 
     def test_digital_high_join(self):
-        # join 300 = 0x012C → low=0x2C, high=0x01
-        data = bytes([0x03, 0x00, 0x2C, 0x01])
+        # Wire channel 299 (0x012B) → join 300. low=0x2B, high=0x01
+        data = bytes([0x03, 0x00, 0x2B, 0x01])
         events = parse_cresnet_signals(data)
         assert events[0].join == 300
         assert events[0].value is True
 
     def test_digital_high_join_release(self):
-        data = bytes([0x03, 0x00, 0x2C, 0x81])
+        data = bytes([0x03, 0x00, 0x2B, 0x81])
         events = parse_cresnet_signals(data)
         assert events[0].join == 300
         assert events[0].value is False
 
     def test_symmetrical_analog(self):
-        # cresnet_len=5, type=0x14, channel=1, value=32767
-        data = bytes([0x05, 0x14, 0x00, 0x01, 0x7F, 0xFF])
+        # Wire channel 0 → join 1
+        data = bytes([0x05, 0x14, 0x00, 0x00, 0x7F, 0xFF])
         events = parse_cresnet_signals(data)
         assert len(events) == 1
         assert events[0].signal_type == SignalType.ANALOG
@@ -273,20 +277,20 @@ class TestParseCresnetSignals:
         assert events[0].value == 32767
 
     def test_analog_zero(self):
-        data = bytes([0x05, 0x14, 0x00, 0x01, 0x00, 0x00])
+        data = bytes([0x05, 0x14, 0x00, 0x00, 0x00, 0x00])
         events = parse_cresnet_signals(data)
         assert events[0].value == 0
 
     def test_analog_max(self):
-        data = bytes([0x05, 0x14, 0x00, 0x01, 0xFF, 0xFF])
+        data = bytes([0x05, 0x14, 0x00, 0x00, 0xFF, 0xFF])
         events = parse_cresnet_signals(data)
         assert events[0].value == 65535
 
     def test_serial(self):
-        # cresnet_len=1+2+1+5=9, type=0x15, channel=1, flags=0x03, data="Hello"
+        # Wire channel 0 → join 1
         text = b"Hello"
         cresnet_len = 1 + 2 + 1 + len(text)
-        data = struct.pack(">BBHB", cresnet_len, 0x15, 1, 0x03) + text
+        data = struct.pack(">BBHB", cresnet_len, 0x15, 0, 0x03) + text
         events = parse_cresnet_signals(data)
         assert len(events) == 1
         assert events[0].signal_type == SignalType.SERIAL
@@ -295,10 +299,10 @@ class TestParseCresnetSignals:
 
     def test_multiple_signals(self):
         """Multiple CRESNET sub-packets in one payload."""
-        # Digital press join 1
-        d1 = bytes([0x03, 0x00, 0x01, 0x00])
-        # Analog join 2 = 1000
-        a1 = bytes([0x05, 0x14, 0x00, 0x02, 0x03, 0xE8])
+        # Digital wire channel 0 → join 1
+        d1 = bytes([0x03, 0x00, 0x00, 0x00])
+        # Analog wire channel 1 → join 2
+        a1 = bytes([0x05, 0x14, 0x00, 0x01, 0x03, 0xE8])
         data = d1 + a1
         events = parse_cresnet_signals(data)
         assert len(events) == 2
@@ -325,7 +329,8 @@ class TestParseCresnetSignals:
 
     def test_type_01_analog_4byte(self):
         """Type 0x01 analog with 2-byte channel + 2-byte value."""
-        data = bytes([0x05, 0x01, 0x00, 0x03, 0x12, 0x34])
+        # Wire channel 2 → join 3
+        data = bytes([0x05, 0x01, 0x00, 0x02, 0x12, 0x34])
         events = parse_cresnet_signals(data)
         assert len(events) == 1
         assert events[0].signal_type == SignalType.ANALOG
