@@ -29,8 +29,7 @@ from .protocol import (
 
 _LOGGER = logging.getLogger(__name__)
 
-_HEARTBEAT_INTERVAL = 10.0  # seconds between heartbeats
-_HEARTBEAT_TIMEOUT = 29.0  # seconds without server response → dead
+_HEARTBEAT_INTERVAL = 15.0  # seconds between CIP heartbeats
 _CONNECT_TIMEOUT = 30.0  # seconds to wait for full handshake
 
 
@@ -370,23 +369,18 @@ class CIPConnection:
     # ------------------------------------------------------------------
 
     async def _heartbeat_loop(self) -> None:
-        """Send periodic heartbeats and detect server silence."""
+        """Send periodic CIP heartbeats.
+
+        Liveness is handled by WebSocket-level pings/pongs (managed by the
+        websockets library).  CIP heartbeats are sent as a keep-alive signal
+        to the processor but we do not timeout on missing responses — some
+        Crestron firmware only uses WebSocket keepalive, not CIP heartbeats.
+        """
         try:
             while self._state == ConnectionState.CONNECTED:
                 await asyncio.sleep(_HEARTBEAT_INTERVAL)
                 if self._state != ConnectionState.CONNECTED:
                     break
-
-                # Check for server silence
-                now = asyncio.get_event_loop().time()
-                if now - self._last_server_msg > _HEARTBEAT_TIMEOUT:
-                    _LOGGER.warning(
-                        "Heartbeat timeout (%.1fs without server message)",
-                        now - self._last_server_msg,
-                    )
-                    await self._cleanup()
-                    return
-
                 try:
                     await self._send_raw(build_heartbeat(self._handle))
                 except CrestronConnectionError:
