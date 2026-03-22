@@ -18,11 +18,6 @@ from typing import Callable
 import websockets
 import websockets.server
 
-import sys
-import os
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
 from pycrestron.protocol import (
     CIPPacketType,
     CresnetType,

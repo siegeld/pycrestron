@@ -1,12 +1,8 @@
 """Integration tests for auto-reconnect behavior."""
 
 import asyncio
-import sys
-import os
 
 import pytest
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from mock_cp4 import MockCP4
 from pycrestron import CrestronClient
