@@ -115,7 +115,6 @@ class CIPConnection:
             self._ws = await websockets.connect(
                 uri,
                 ssl=ssl_ctx,
-                extra_headers={},
                 max_size=2**20,
                 open_timeout=10,
             )
